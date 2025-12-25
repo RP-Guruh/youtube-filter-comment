@@ -15,11 +15,14 @@ func (kernel Kernel) Migrations() []schema.Migration {
 	return []schema.Migration{
 		&migrations.M20210101000001CreateUsersTable{},
 		&migrations.M20210101000002CreateJobsTable{},
+		&migrations.M20251225084028CreateYoutubeChannelsTable{},
 	}
 }
 
 func (kernel Kernel) Seeders() []seeder.Seeder {
 	return []seeder.Seeder{
 		&seeders.DatabaseSeeder{},
+		&seeders.AdminSeeder{},
+		&seeders.UserSeeder{},
 	}
 }
