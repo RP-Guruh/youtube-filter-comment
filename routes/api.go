@@ -14,6 +14,7 @@ func Api() {
 	connectyoutubeController := controllers.NewConnectYoutubeController()
 	youtubeController := controllers.NewYoutubeController()
 	settingVideosController := controllers.NewSettingVideosController()
+	scanCommentController := controllers.NewScanCommentController()
 
 	facades.Route().Get("/users/{id}", userController.Show)
 
@@ -30,6 +31,9 @@ func Api() {
 
 		// Setting video
 		router.Middleware(middleware.Auth()).Resource("/video-settings", settingVideosController)
+
+		// scan komentar (mode manual)
+		router.Middleware(middleware.Auth()).Get("/scan-comment/{id}", scanCommentController.ScanComment)
 
 	})
 

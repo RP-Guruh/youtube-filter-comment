@@ -20,6 +20,7 @@ func (kernel Kernel) Migrations() []schema.Migration {
 		&migrations.M20251228042654CreateVideoSettingsTable{},
 		&migrations.M20251228042722CreateQuarantinedCommentsTable{},
 		&migrations.M20251228050559CreateLogCommentsTable{},
+		&migrations.M20251228112825CreateBadWordsTable{},
 	}
 }
 
@@ -28,5 +29,6 @@ func (kernel Kernel) Seeders() []seeder.Seeder {
 		&seeders.DatabaseSeeder{},
 		&seeders.AdminSeeder{},
 		&seeders.UserSeeder{},
+		&seeders.BadWordsSeeder{},
 	}
 }

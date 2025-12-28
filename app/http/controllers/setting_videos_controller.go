@@ -31,6 +31,7 @@ func (r *SettingVideosController) Index(ctx http.Context) http.Response {
 
 	var settingVideos []models.VideoSetting
 	err := facades.Orm().Query().
+		Select("video_settings.*").
 		Join("JOIN videos ON videos.id = video_settings.video_id").
 		Where("videos.user_id", user.ID).
 		Get(&settingVideos)
@@ -55,6 +56,7 @@ func (r *SettingVideosController) Show(ctx http.Context) http.Response {
 	id := ctx.Request().Route("id")
 	var settingVideo models.VideoSetting
 	err := facades.Orm().Query().
+		Select("video_settings.*").
 		Join("JOIN videos ON videos.id = video_settings.video_id").
 		Where("video_settings.id", id).
 		Where("videos.user_id", user.ID).
@@ -101,10 +103,11 @@ func (r *SettingVideosController) Store(ctx http.Context) http.Response {
 
 	// 3. validasi video (pastikan milik user)
 	var video models.Video
+	log.Printf("[DEBUG] Store Setting: VideoID=%v, UserID=%v", settingVideoRequest.VideoID, user.ID)
 	facades.Orm().Query().Where("id", settingVideoRequest.VideoID).Where("user_id", user.ID).First(&video)
 	if video.ID == 0 {
 		return ctx.Response().Json(http.StatusNotFound, http.Json{
-			"message": "Video tidak ditemukan atau Anda tidak memiliki akses",
+			"message": "Video tidak ditemukan atau Anda tidak memiliki akses (Pastikan video_id adalah ID numeric dari database)",
 		})
 	}
 
@@ -150,6 +153,7 @@ func (r *SettingVideosController) Update(ctx http.Context) http.Response {
 	id := ctx.Request().Route("id")
 	var settingVideo models.VideoSetting
 	err := facades.Orm().Query().
+		Select("video_settings.*").
 		Join("JOIN videos ON videos.id = video_settings.video_id").
 		Where("video_settings.id", id).
 		Where("videos.user_id", user.ID).
@@ -222,6 +226,7 @@ func (r *SettingVideosController) Destroy(ctx http.Context) http.Response {
 	log.Println("ID SETTING : ", id)
 	var settingVideo models.VideoSetting
 	err := facades.Orm().Query().
+		Select("video_settings.*").
 		Join("JOIN videos ON videos.id = video_settings.video_id").
 		Where("video_settings.id", id).
 		Where("videos.user_id", user.ID).

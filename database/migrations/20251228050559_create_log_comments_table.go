@@ -20,6 +20,7 @@ func (r *M20251228050559CreateLogCommentsTable) Up() error {
 			table.UnsignedBigInteger("video_id")
 			table.String("author_name")
 			table.Text("comment_text")
+			table.String("comment_id")
 			table.String("comment_category") // sara, judi online, pornografi
 			table.String("origin_action")    // auto, manual
 			table.String("final_action")     // deleted, ignore
