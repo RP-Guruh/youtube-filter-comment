@@ -17,6 +17,9 @@ func (kernel Kernel) Migrations() []schema.Migration {
 		&migrations.M20210101000002CreateJobsTable{},
 		&migrations.M20251225084028CreateYoutubeChannelsTable{},
 		&migrations.M20251227120745CreateVideosTable{},
+		&migrations.M20251228042654CreateVideoSettingsTable{},
+		&migrations.M20251228042722CreateQuarantinedCommentsTable{},
+		&migrations.M20251228050559CreateLogCommentsTable{},
 	}
 }
 
