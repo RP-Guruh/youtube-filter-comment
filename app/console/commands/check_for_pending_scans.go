@@ -2,19 +2,14 @@ package commands
 
 import (
 	"context"
-	"goravel/app/helpers"
 	"goravel/app/models"
+	"goravel/app/services"
 	"log"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/goravel/framework/contracts/console"
 	"github.com/goravel/framework/contracts/console/command"
 	"github.com/goravel/framework/facades"
-	"golang.org/x/oauth2"
-	"google.golang.org/api/option"
-	"google.golang.org/api/youtube/v3"
 )
 
 type CheckForPendingScans struct {
@@ -50,10 +45,6 @@ func (r *CheckForPendingScans) Handle(ctx console.Context) error {
 		return nil
 	}
 	log.Println("setting di command :", settings)
-	// Ambil semua badwords yang aktif
-	var badWords []models.BadWord
-	_ = facades.Orm().Query().Where("is_active", true).Get(&badWords)
-	normalizer := helpers.NewTextNormalize()
 
 	for _, setting := range settings {
 		// 2. Ambil info video
@@ -70,111 +61,12 @@ func (r *CheckForPendingScans) Handle(ctx console.Context) error {
 			continue
 		}
 
-		// 4. Setup YouTube Service
-		token := &oauth2.Token{
-			AccessToken:  youtubeChannel.AccessToken,
-			RefreshToken: youtubeChannel.RefreshToken,
-			Expiry:       youtubeChannel.ExpiresAt,
-		}
-		config := helpers.GetGoogleConfig()
-		httpClient := config.Client(context.Background(), token)
-		youtubeService, err := youtube.NewService(context.Background(), option.WithHTTPClient(httpClient))
+		// 4-6. Proses scan melalui service
+		scanService := services.NewScanCommentService()
+		_, err = scanService.ScanAndProcess(context.Background(), video, setting)
 		if err != nil {
-			log.Printf("[SCAN] Gagal membuat service untuk video %s: %v\n", video.VideoID, err)
+			log.Printf("[SCAN] Gagal proses video %s melalui service: %v\n", video.VideoID, err)
 			continue
-		}
-
-		// 5. Ambil 10 komentar terbaru
-		call := youtubeService.CommentThreads.List([]string{"snippet"}).VideoId(video.VideoID).MaxResults(10).Order("time")
-		response, err := call.Do()
-		if err != nil {
-			log.Printf("[SCAN] Gagal ambil komentar untuk video %s: %v\n", video.VideoID, err)
-			continue
-		}
-
-		// 6. Proses komentar dengan Goroutines & Gemini AI
-		commentsToProcess := make(map[string]string)
-		for _, item := range response.Items {
-			snippet := item.Snippet.TopLevelComment.Snippet
-			commentID := item.Snippet.TopLevelComment.Id
-			commentsToProcess[commentID] = snippet.TextDisplay
-		}
-
-		// Cek dengan Gemini AI
-		aiResults := helpers.CheckJudolComments(commentsToProcess)
-		log.Printf("[SCAN] Auto Scan Video %s AI results: %+v", video.VideoID, aiResults)
-
-		for _, item := range response.Items {
-			snippet := item.Snippet.TopLevelComment.Snippet
-			commentID := item.Snippet.TopLevelComment.Id
-			originalText := snippet.TextDisplay
-			authorName := snippet.AuthorDisplayName
-			normalizedText := normalizer.Normalize(originalText)
-
-			isBad := false
-			category := ""
-
-			// 1. Cek dengan Bad Words (List)
-			for _, bw := range badWords {
-				if bw.IsRegex {
-					matched, _ := regexp.MatchString(bw.Word, normalizedText)
-					if matched {
-						isBad = true
-						category = bw.Category
-						break
-					}
-				} else {
-					if strings.Contains(normalizedText, strings.ToLower(bw.Word)) {
-						isBad = true
-						category = bw.Category
-						break
-					}
-				}
-			}
-
-			// 2. Cek dengan AI jika belum terdeteksi bad word
-			if !isBad {
-				if isJudol, ok := aiResults[commentID]; ok && isJudol {
-					isBad = true
-					category = "AI: Judi Online"
-				}
-			}
-
-			if isBad {
-				if setting.ActionMode == "list" {
-					count, _ := facades.Orm().Query().Model(&models.QuarantinedComment{}).Where("comment_id", commentID).Count()
-					if count == 0 {
-						qComment := models.QuarantinedComment{
-							VideoID:         video.ID,
-							CommentID:       commentID,
-							AuthorName:      authorName,
-							CommentText:     originalText,
-							CommentCategory: category,
-							Status:          "pending",
-						}
-						facades.Orm().Query().Create(&qComment)
-					}
-				} else if setting.ActionMode == "deleted" {
-					count, _ := facades.Orm().Query().Model(&models.LogComment{}).Where("comment_id", commentID).Count()
-					if count == 0 {
-						err := youtubeService.Comments.Delete(commentID).Do()
-						if err != nil {
-							log.Printf("[SCAN] Gagal hapus komentar %s: %v", commentID, err)
-						} else {
-							lComment := models.LogComment{
-								VideoID:         video.ID,
-								AuthorName:      authorName,
-								CommentText:     originalText,
-								CommentId:       commentID,
-								CommentCategory: category,
-								OriginAction:    "auto",
-								FinalAction:     "deleted",
-							}
-							facades.Orm().Query().Create(&lComment)
-						}
-					}
-				}
-			}
 		}
 
 		// 7. Update jadwal scan

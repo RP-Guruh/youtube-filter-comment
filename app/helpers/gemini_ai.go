@@ -44,7 +44,7 @@ func CheckJudolComments(comments map[string]string) map[string]bool {
 
 	// 4. SETTING MODEL YANG DIGUNAKAN (FLASH LITE) DAN FORMAT OUTPUT JSON
 	// Menggunakan gemini-2.5-flash-lite untuk kecepatan dan efisiensi
-	model := client.GenerativeModel("gemini-2.5-flash-lite")
+	model := client.GenerativeModel("gemma-3-27b") // gemini-2.5-flash-lite
 
 	// Set response format ke JSON if supported, but manual cleaning is safer
 	model.ResponseMIMEType = "application/json"

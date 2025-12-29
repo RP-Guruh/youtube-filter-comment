@@ -3,16 +3,11 @@ package controllers
 import (
 	"goravel/app/helpers"
 	"goravel/app/models"
+	"goravel/app/services"
 	"log"
-	"regexp"
-	"strings"
-	"sync"
 
 	"github.com/goravel/framework/contracts/http"
 	"github.com/goravel/framework/facades"
-	"golang.org/x/oauth2"
-	"google.golang.org/api/option"
-	"google.golang.org/api/youtube/v3"
 )
 
 type ScanCommentController struct {
@@ -56,48 +51,7 @@ func (r *ScanCommentController) ScanComment(ctx http.Context) http.Response {
 		})
 	}
 
-	// 4. periksa melalui youtube data api v3 10 komentar terbaru
-
-	// Ambil token dari youtube_channels
-	var youtubeChannel models.YoutubeChannel
-	err = facades.Orm().Query().Where("user_id", user.ID).Where("is_active", true).First(&youtubeChannel)
-	if err != nil || youtubeChannel.ID == 0 {
-		return ctx.Response().Json(http.StatusForbidden, http.Json{
-			"message": "Channel YouTube belum terhubung atau tidak aktif",
-		})
-	}
-
-	// Buat token oauth2
-	token := &oauth2.Token{
-		AccessToken:  youtubeChannel.AccessToken,
-		RefreshToken: youtubeChannel.RefreshToken,
-		Expiry:       youtubeChannel.ExpiresAt,
-	}
-
-	config := helpers.GetGoogleConfig()
-	client := config.Client(ctx.Context(), token)
-
-	youtubeService, err := youtube.NewService(ctx.Context(), option.WithHTTPClient(client))
-	if err != nil {
-		log.Println("[ERROR] Gagal membuat YouTube service:", err)
-		return ctx.Response().Json(http.StatusInternalServerError, http.Json{
-			"message": "Gagal terhubung ke YouTube service",
-		})
-	}
-
-	// Ambil 10 komentar terbaru
-	call := youtubeService.CommentThreads.List([]string{"snippet"}).VideoId(video.VideoID).MaxResults(10).Order("time")
-	response, err := call.Do()
-	if err != nil {
-		log.Println("[ERROR] Gagal mengambil komentar youtube:", err)
-		return ctx.Response().Json(http.StatusInternalServerError, http.Json{
-			"message": "Gagal mengambil komentar dari YouTube: " + err.Error(),
-		})
-	}
-
-	// 5 & 6. pengecekan badwords (Goroutines) dan Aksi (Quarantine/Delete)
-
-	// Ambil setting video
+	// 3. Ambil setting video
 	var setting models.VideoSetting
 	err = facades.Orm().Query().Where("video_id", video.ID).First(&setting)
 	if err != nil || setting.ID == 0 {
@@ -106,132 +60,28 @@ func (r *ScanCommentController) ScanComment(ctx http.Context) http.Response {
 		})
 	}
 
-	// Ambil semua badwords yang aktif
-	var badWords []models.BadWord
-	err = facades.Orm().Query().Where("is_active", true).Get(&badWords)
+	// 4. Hubungkan ke service baru
+	scanService := services.NewScanCommentService()
+	serviceResults, err := scanService.ScanAndProcess(ctx.Context(), video, setting)
 	if err != nil {
-		log.Println("[ERROR] Gagal mengambil bad words:", err)
+		log.Println("[ERROR] Gagal proses scan melalui service:", err)
+		return ctx.Response().Json(http.StatusInternalServerError, http.Json{
+			"message": "Gagal melakukan scan: " + err.Error(),
+		})
 	}
 
-	// 5 & 6. Pengecekan badwords dan Gemini AI
-	normalizer := helpers.NewTextNormalize()
-	commentsToProcess := make(map[string]string)
-	commentDetails := make(map[string]struct {
-		AuthorName   string
-		OriginalText string
-	})
-
-	for _, item := range response.Items {
-		snippet := item.Snippet.TopLevelComment.Snippet
-		commentID := item.Snippet.TopLevelComment.Id
-		originalText := snippet.TextDisplay
-		commentsToProcess[commentID] = originalText
-		commentDetails[commentID] = struct {
-			AuthorName   string
-			OriginalText string
-		}{
-			AuthorName:   snippet.AuthorDisplayName,
-			OriginalText: originalText,
-		}
-	}
-
-	// Cek dengan Gemini
-	aiResults := helpers.CheckJudolComments(commentsToProcess)
-	log.Printf("[SCAN] Manual Scan AI results: %+v", aiResults)
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	// Format results for response
 	var filteredComments []http.Json
-	for _, item := range response.Items {
-		wg.Add(1)
-		go func(item *youtube.CommentThread) {
-			defer wg.Done()
-
-			snippet := item.Snippet.TopLevelComment.Snippet
-			commentID := item.Snippet.TopLevelComment.Id
-			originalText := snippet.TextDisplay
-			authorName := snippet.AuthorDisplayName
-			normalizedText := normalizer.Normalize(originalText)
-
-			isBad := false
-			category := ""
-
-			// Check by bad words first (faster)
-			for _, bw := range badWords {
-				if bw.IsRegex {
-					matched, _ := regexp.MatchString(bw.Word, normalizedText)
-					if matched {
-						isBad = true
-						category = bw.Category
-						break
-					}
-				} else {
-					if strings.Contains(normalizedText, strings.ToLower(bw.Word)) {
-						isBad = true
-						category = bw.Category
-						break
-					}
-				}
-			}
-
-			// If not bad by keywords, check Gemini result
-			if !isBad {
-				if isJudol, ok := aiResults[commentID]; ok && isJudol {
-					isBad = true
-					category = "AI: Judi Online"
-				}
-			}
-
-			if isBad {
-				if setting.ActionMode == "list" {
-					count, _ := facades.Orm().Query().Model(&models.QuarantinedComment{}).Where("comment_id", commentID).Count()
-					if count == 0 {
-						qComment := models.QuarantinedComment{
-							VideoID:         video.ID,
-							CommentID:       commentID,
-							AuthorName:      authorName,
-							CommentText:     originalText,
-							CommentCategory: category,
-							Status:          "pending",
-						}
-						facades.Orm().Query().Create(&qComment)
-					}
-				} else if setting.ActionMode == "deleted" {
-					// Check log if already deleted
-					count, _ := facades.Orm().Query().Model(&models.LogComment{}).Where("comment_id", commentID).Count()
-					if count == 0 {
-						err := youtubeService.Comments.Delete(commentID).Do()
-						if err != nil {
-							log.Printf("[ERROR] Gagal hapus komentar %s: %v", commentID, err)
-						} else {
-							lComment := models.LogComment{
-								VideoID:         video.ID,
-								AuthorName:      authorName,
-								CommentText:     originalText,
-								CommentId:       commentID,
-								CommentCategory: category,
-								OriginAction:    "auto",
-								FinalAction:     "deleted",
-							}
-							facades.Orm().Query().Create(&lComment)
-						}
-					}
-				}
-			}
-
-			mu.Lock()
-			filteredComments = append(filteredComments, http.Json{
-				"comment_id":   commentID,
-				"author_name":  authorName,
-				"comment_text": originalText,
-				"published_at": snippet.PublishedAt,
-				"is_bad":       isBad,
-				"category":     category,
-			})
-			mu.Unlock()
-		}(item)
+	for _, res := range serviceResults {
+		filteredComments = append(filteredComments, http.Json{
+			"comment_id":   res.CommentID,
+			"author_name":  res.AuthorName,
+			"comment_text": res.CommentText,
+			"published_at": res.PublishedAt,
+			"is_bad":       res.IsBad,
+			"category":     res.Category,
+		})
 	}
-	wg.Wait()
 
 	return ctx.Response().Json(http.StatusOK, http.Json{
 		"comments": filteredComments,
