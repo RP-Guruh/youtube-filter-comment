@@ -113,18 +113,42 @@ func (r *ScanCommentController) ScanComment(ctx http.Context) http.Response {
 		log.Println("[ERROR] Gagal mengambil bad words:", err)
 	}
 
+	// 5 & 6. Pengecekan badwords dan Gemini AI
 	normalizer := helpers.NewTextNormalize()
+	commentsToProcess := make(map[string]string)
+	commentDetails := make(map[string]struct {
+		AuthorName   string
+		OriginalText string
+	})
+
+	for _, item := range response.Items {
+		snippet := item.Snippet.TopLevelComment.Snippet
+		commentID := item.Snippet.TopLevelComment.Id
+		originalText := snippet.TextDisplay
+		commentsToProcess[commentID] = originalText
+		commentDetails[commentID] = struct {
+			AuthorName   string
+			OriginalText string
+		}{
+			AuthorName:   snippet.AuthorDisplayName,
+			OriginalText: originalText,
+		}
+	}
+
+	// Cek dengan Gemini
+	aiResults := helpers.CheckJudolComments(commentsToProcess)
+	log.Printf("[SCAN] Manual Scan AI results: %+v", aiResults)
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var filteredComments []http.Json
-
 	for _, item := range response.Items {
 		wg.Add(1)
-		go func(rawComment *youtube.CommentThread) {
+		go func(item *youtube.CommentThread) {
 			defer wg.Done()
 
-			snippet := rawComment.Snippet.TopLevelComment.Snippet
-			commentID := rawComment.Snippet.TopLevelComment.Id
+			snippet := item.Snippet.TopLevelComment.Snippet
+			commentID := item.Snippet.TopLevelComment.Id
 			originalText := snippet.TextDisplay
 			authorName := snippet.AuthorDisplayName
 			normalizedText := normalizer.Normalize(originalText)
@@ -132,6 +156,7 @@ func (r *ScanCommentController) ScanComment(ctx http.Context) http.Response {
 			isBad := false
 			category := ""
 
+			// Check by bad words first (faster)
 			for _, bw := range badWords {
 				if bw.IsRegex {
 					matched, _ := regexp.MatchString(bw.Word, normalizedText)
@@ -149,9 +174,16 @@ func (r *ScanCommentController) ScanComment(ctx http.Context) http.Response {
 				}
 			}
 
+			// If not bad by keywords, check Gemini result
+			if !isBad {
+				if isJudol, ok := aiResults[commentID]; ok && isJudol {
+					isBad = true
+					category = "AI: Judi Online"
+				}
+			}
+
 			if isBad {
 				if setting.ActionMode == "list" {
-					log.Println("action mode :", setting.ActionMode)
 					count, _ := facades.Orm().Query().Model(&models.QuarantinedComment{}).Where("comment_id", commentID).Count()
 					if count == 0 {
 						qComment := models.QuarantinedComment{
@@ -162,14 +194,11 @@ func (r *ScanCommentController) ScanComment(ctx http.Context) http.Response {
 							CommentCategory: category,
 							Status:          "pending",
 						}
-						err = facades.Orm().Query().Create(&qComment)
-						if err != nil {
-							log.Println("[ERROR] Gagal menambahkan komentar ke karantina:", err)
-						}
+						facades.Orm().Query().Create(&qComment)
 					}
 				} else if setting.ActionMode == "deleted" {
-					count, _ := facades.Orm().Query().Model(&models.LogComment{}).Where("comment_text", originalText).Where("video_id", video.ID).Where("author_name", authorName).Count()
-
+					// Check log if already deleted
+					count, _ := facades.Orm().Query().Model(&models.LogComment{}).Where("comment_id", commentID).Count()
 					if count == 0 {
 						err := youtubeService.Comments.Delete(commentID).Do()
 						if err != nil {
@@ -202,7 +231,6 @@ func (r *ScanCommentController) ScanComment(ctx http.Context) http.Response {
 			mu.Unlock()
 		}(item)
 	}
-
 	wg.Wait()
 
 	return ctx.Response().Json(http.StatusOK, http.Json{

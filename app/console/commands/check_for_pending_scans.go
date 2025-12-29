@@ -7,7 +7,6 @@ import (
 	"log"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/goravel/framework/contracts/console"
@@ -93,77 +92,90 @@ func (r *CheckForPendingScans) Handle(ctx console.Context) error {
 			continue
 		}
 
-		// 6. Proses komentar dengan Goroutines
-		var wg sync.WaitGroup
+		// 6. Proses komentar dengan Goroutines & Gemini AI
+		commentsToProcess := make(map[string]string)
 		for _, item := range response.Items {
-			wg.Add(1)
-			go func(rawComment *youtube.CommentThread, v models.Video, s models.VideoSetting) {
-				defer wg.Done()
+			snippet := item.Snippet.TopLevelComment.Snippet
+			commentID := item.Snippet.TopLevelComment.Id
+			commentsToProcess[commentID] = snippet.TextDisplay
+		}
 
-				snippet := rawComment.Snippet.TopLevelComment.Snippet
-				commentID := rawComment.Snippet.TopLevelComment.Id
-				originalText := snippet.TextDisplay
-				authorName := snippet.AuthorDisplayName
-				normalizedText := normalizer.Normalize(originalText)
+		// Cek dengan Gemini AI
+		aiResults := helpers.CheckJudolComments(commentsToProcess)
+		log.Printf("[SCAN] Auto Scan Video %s AI results: %+v", video.VideoID, aiResults)
 
-				isBad := false
-				category := ""
+		for _, item := range response.Items {
+			snippet := item.Snippet.TopLevelComment.Snippet
+			commentID := item.Snippet.TopLevelComment.Id
+			originalText := snippet.TextDisplay
+			authorName := snippet.AuthorDisplayName
+			normalizedText := normalizer.Normalize(originalText)
 
-				for _, bw := range badWords {
-					if bw.IsRegex {
-						matched, _ := regexp.MatchString(bw.Word, normalizedText)
-						if matched {
-							isBad = true
-							category = bw.Category
-							break
-						}
-					} else {
-						if strings.Contains(normalizedText, strings.ToLower(bw.Word)) {
-							isBad = true
-							category = bw.Category
-							break
-						}
+			isBad := false
+			category := ""
+
+			// 1. Cek dengan Bad Words (List)
+			for _, bw := range badWords {
+				if bw.IsRegex {
+					matched, _ := regexp.MatchString(bw.Word, normalizedText)
+					if matched {
+						isBad = true
+						category = bw.Category
+						break
+					}
+				} else {
+					if strings.Contains(normalizedText, strings.ToLower(bw.Word)) {
+						isBad = true
+						category = bw.Category
+						break
 					}
 				}
+			}
 
-				if isBad {
-					if s.ActionMode == "list" {
-						count, _ := facades.Orm().Query().Model(&models.QuarantinedComment{}).Where("comment_id", commentID).Count()
-						if count == 0 {
-							qComment := models.QuarantinedComment{
-								VideoID:         v.ID,
-								CommentID:       commentID,
+			// 2. Cek dengan AI jika belum terdeteksi bad word
+			if !isBad {
+				if isJudol, ok := aiResults[commentID]; ok && isJudol {
+					isBad = true
+					category = "AI: Judi Online"
+				}
+			}
+
+			if isBad {
+				if setting.ActionMode == "list" {
+					count, _ := facades.Orm().Query().Model(&models.QuarantinedComment{}).Where("comment_id", commentID).Count()
+					if count == 0 {
+						qComment := models.QuarantinedComment{
+							VideoID:         video.ID,
+							CommentID:       commentID,
+							AuthorName:      authorName,
+							CommentText:     originalText,
+							CommentCategory: category,
+							Status:          "pending",
+						}
+						facades.Orm().Query().Create(&qComment)
+					}
+				} else if setting.ActionMode == "deleted" {
+					count, _ := facades.Orm().Query().Model(&models.LogComment{}).Where("comment_id", commentID).Count()
+					if count == 0 {
+						err := youtubeService.Comments.Delete(commentID).Do()
+						if err != nil {
+							log.Printf("[SCAN] Gagal hapus komentar %s: %v", commentID, err)
+						} else {
+							lComment := models.LogComment{
+								VideoID:         video.ID,
 								AuthorName:      authorName,
 								CommentText:     originalText,
+								CommentId:       commentID,
 								CommentCategory: category,
-								Status:          "pending",
+								OriginAction:    "auto",
+								FinalAction:     "deleted",
 							}
-							facades.Orm().Query().Create(&qComment)
-						}
-					} else if s.ActionMode == "deleted" {
-						count, _ := facades.Orm().Query().Model(&models.LogComment{}).Where("comment_id", commentID).Count()
-						if count == 0 {
-							err := youtubeService.Comments.Delete(commentID).Do()
-							if err != nil {
-								log.Printf("[SCAN] Gagal hapus komentar %s: %v", commentID, err)
-							} else {
-								lComment := models.LogComment{
-									VideoID:         v.ID,
-									AuthorName:      authorName,
-									CommentText:     originalText,
-									CommentId:       commentID,
-									CommentCategory: category,
-									OriginAction:    "auto",
-									FinalAction:     "deleted",
-								}
-								facades.Orm().Query().Create(&lComment)
-							}
+							facades.Orm().Query().Create(&lComment)
 						}
 					}
 				}
-			}(item, video, setting)
+			}
 		}
-		wg.Wait()
 
 		// 7. Update jadwal scan
 		lastScanned := time.Now()
